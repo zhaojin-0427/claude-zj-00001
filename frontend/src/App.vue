@@ -55,11 +55,10 @@ const activeIndex = computed(() => {
         </div>
       </el-header>
       <el-main>
-        <router-view v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </router-view>
+        <!-- 不在 router-view 外包 <transition mode="out-in">：
+             各页面为多根节点（fragment），Transition 要求单元素根节点，
+             否则离场动画无法完成、新组件不会挂载，表现为导航后内容空白 -->
+        <router-view />
       </el-main>
     </el-container>
   </el-container>
@@ -91,6 +90,4 @@ const activeIndex = computed(() => {
 .header-title { font-size: 17px; font-weight: 600; color: #303133; }
 .header-right { display: flex; align-items: center; gap: 10px; }
 .doctor-name { color: #606266; font-size: 14px; }
-.fade-enter-active, .fade-leave-active { transition: opacity .15s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

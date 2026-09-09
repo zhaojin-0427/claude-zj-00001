@@ -12,10 +12,10 @@ const metricCards = computed(() => {
   const s = stats.value
   return [
     { label: '综合疫苗接种覆盖率', value: s.overall_coverage_rate, suffix: '%',
-      sub: `有效免疫 ${s.overdue ? '' : ''}${s.vaccination_count} 针次在册`,
+      sub: `有效免疫 ${s.overdue.applicable - s.overdue.unvaccinated} / 应种 ${s.overdue.applicable} 组合`,
       color: '#409eff', icon: '💉' },
     { label: '不良反应率', value: s.adverse.rate, suffix: '%',
-      sub: `轻微 ${s.adverse.mild} 例 · 严重 ${s.adverse.severe} 例`,
+      sub: `${s.vaccination_count} 针次中：轻微 ${s.adverse.mild} · 严重 ${s.adverse.severe}`,
       color: '#e6a23c', icon: '⚠️' },
     { label: '到期未接种比例', value: s.overdue.rate, suffix: '%',
       sub: `逾期 ${s.overdue.overdue} · 从未接种 ${s.overdue.never}`,

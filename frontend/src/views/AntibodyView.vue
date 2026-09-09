@@ -45,20 +45,32 @@ const grouped = computed(() => {
   }))
 })
 
+// 合并所有检测日期构成统一时间轴，避免多疫苗时日期错位
+const allDates = computed(() => {
+  const set = new Set(tests.value.map(t => t.test_date))
+  return [...set].sort()
+})
+
 const chartData = computed(() => ({
-  labels: grouped.value[0]?.list.map(t => t.test_date) || [],
+  labels: allDates.value,
   datasets: grouped.value.map((g, i) => {
     const colors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#9b59b6']
     const c = colors[i % colors.length]
+    // 日期 -> 检测记录，用于将该疫苗的数据对齐到统一时间轴
+    const byDate = new Map(g.list.map(t => [t.test_date, t]))
+    const aligned = allDates.value.map(d => byDate.get(d) ?? null)
     return {
       label: g.name,
-      data: g.list.map(t => t.titer ?? null),
+      data: aligned.map(t => t?.titer ?? null),
       borderColor: c,
       backgroundColor: c + '22',
       tension: 0.3,
       spanGaps: true,
       pointRadius: 5,
-      pointBackgroundColor: g.list.map(t => RESULT_COLOR[t.result] || c),
+      // 无数据点透明，避免在错位日期画出多余标记
+      pointBackgroundColor: aligned.map(t => t ? (RESULT_COLOR[t.result] || c) : 'rgba(0,0,0,0)'),
+      pointBorderColor: aligned.map(t => t ? (RESULT_COLOR[t.result] || c) : 'rgba(0,0,0,0)'),
+      _aligned: aligned,
     }
   }),
 }))
@@ -70,10 +82,12 @@ const chartOptions = {
   plugins: {
     legend: { position: 'bottom' as const },
     tooltip: {
+      filter: (item: any) => item.raw !== null && item.raw !== undefined,
       callbacks: {
         afterLabel(ctx: any) {
-          const g = grouped.value[ctx.datasetIndex]
-          return g?.list[ctx.dataIndex]?.result
+          const aligned = chartData.value.datasets[ctx.datasetIndex]._aligned as
+            (AntibodyTest | null)[]
+          return aligned[ctx.dataIndex]?.result
         },
       },
     },
