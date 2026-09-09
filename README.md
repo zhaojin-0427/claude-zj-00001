@@ -1,0 +1,57 @@
+# 宠物疫苗接种档案与到期提醒平台
+
+技术栈：**Flask（SQLite）+ Vue 3 + TypeScript + Vite + Element Plus + Chart.js**
+
+## 功能
+
+| 模块 | 说明 |
+| --- | --- |
+| 宠物档案 | 主人信息登记、宠物档案（物种/品种/性别/出生日期/芯片/绝育），详情页查看**完整接种史**时间线与抗体记录、各疫苗当前免疫状态 |
+| 接种登记 | 医生登记疫苗批号、生产厂家、注射部位、不良反应（无/轻微/严重+描述）、下次接种建议；系统按疫苗标准间隔**自动计算到期日**（可手动覆盖） |
+| 到期提醒看板 | 每只宠物 × 每种适用疫苗的状态：已逾期 / 30天内即将到期 / 从未接种 / 免疫有效；支持筛选、搜索主人电话、一键跳转登记 |
+| 抗体趋势图 | 按宠物查看各疫苗抗体滴度折线趋势（阳性/弱阳性/阴性彩色标点）、结果汇总，支持登记新检测 |
+| 数据统计 | 各疫苗接种覆盖率（横向对比图+明细表）、不良反应率（环形图+严重率）、到期未接种比例（逾期+从未接种）、各疫苗抗体阳性率、近12月接种趋势、近期不良反应清单 |
+
+## 启动
+
+### 1. 后端（端口 5000）
+
+```bash
+cd backend
+pip install -r requirements.txt
+python3 seed.py     # 初始化数据库并写入演示数据（8 位主人 / 14 只宠物 / 95 条接种 / 25 条抗体检测）
+python3 app.py      # http://localhost:5000
+```
+
+### 2. 前端（端口 5173）
+
+```bash
+cd frontend
+npm install
+npm run dev         # http://localhost:5173 （/api 已代理到 5000）
+```
+
+打开 http://localhost:5173 ，默认进入"到期提醒"看板。
+
+## API 概览
+
+- `GET/POST /api/owners` 主人
+- `GET/POST /api/pets`、`GET /api/pets/:id`（含接种史、抗体记录、各疫苗状态）
+- `GET /api/vaccines` 疫苗字典（按物种过滤）
+- `GET/POST /api/vaccinations` 接种记录（POST 自动计算 `next_due_date`）
+- `GET/POST /api/antibodies` 抗体检测
+- `GET /api/reminders?status=&species=&q=` 到期看板数据
+- `GET /api/stats` 覆盖率 / 不良反应率 / 到期未接种比例 / 抗体阳性率
+
+## 到期计算规则
+
+- 接种登记日 + 疫苗标准间隔天数（犬猫核心苗 365 天、兔瘟苗 180 天）= 下次到期日
+- 状态判定：到期日早于今天 = **已逾期**；30 天内 = **即将到期**；有有效记录 = **免疫有效**；无记录且日龄 ≥ 60 天 = **从未接种**
+- 覆盖率分母为"到龄应种组合数"（宠物数 × 适用疫苗数，60 日龄以下不计）
+
+## 目录结构
+
+```
+backend/   app.py（API+统计） db.py（建表） seed.py（演示数据）
+frontend/  src/api（HTTP 封装与 TS 类型） src/views（5 个页面） src/components/Charts.ts
+```

@@ -1,0 +1,62 @@
+* { box-sizing: border-box; }
+
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  background: #f0f2f5;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 16px;
+  color: #303133;
+}
+
+.card-shadow {
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  border-radius: 8px;
+}
+
+.stat-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+}
+
+.stat-card .icon-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.stat-card .stat-label { color: #909399; font-size: 13px; }
+.stat-card .stat-value { font-size: 26px; font-weight: 700; color: #303133; line-height: 1.2; }
+.stat-card .stat-sub { font-size: 12px; color: #909399; margin-top: 2px; }
+
+.filter-bar {
+  background: #fff;
+  padding: 14px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+}
+
+.el-table { border-radius: 8px; }
