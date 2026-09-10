@@ -63,6 +63,19 @@ CREATE TABLE IF NOT EXISTS antibody_tests (
     note         TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS followup_plans (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pet_id       INTEGER NOT NULL REFERENCES pets(id),
+    vaccine_id   INTEGER NOT NULL REFERENCES vaccines(id),
+    plan_date    TEXT NOT NULL,          -- 计划随访日期
+    assignee     TEXT NOT NULL,          -- 负责人
+    note         TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK(status IN ('pending','confirmed','completed','cancelled')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at   TEXT
+);
 """
 
 

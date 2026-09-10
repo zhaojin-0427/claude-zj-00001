@@ -91,7 +91,12 @@ async function submit() {
       next_due_date: form.auto_due ? undefined : form.next_due_date,
       note: form.note,
     })
-    ElMessage.success(`接种登记成功，下次到期日 ${res.next_due_date}`)
+    if (res.completed_plan_id) {
+      ElMessage.success(`接种登记成功，下次到期日 ${res.next_due_date}；`
+        + `已自动完成随访计划 #${res.completed_plan_id}`)
+    } else {
+      ElMessage.success(`接种登记成功，下次到期日 ${res.next_due_date}`)
+    }
     records.value = await vaccinationsApi.list()
     // 保留宠物和医生，清空批号等
     form.batch_no = ''; form.reaction_level = '无'

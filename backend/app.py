@@ -12,6 +12,11 @@ app.teardown_appcontext(close_db)
 SOON_DAYS = 30        # 30 天内到期视为"即将到期"
 FIRST_VAC_AGE = 60    # 超过 60 日龄纳入应接种统计
 
+# 随访计划状态：pending 待确认 / confirmed 已确认 / completed 已完成 / cancelled 已取消
+PLAN_STATUSES = ("pending", "confirmed", "completed", "cancelled")
+OPEN_PLAN_STATUSES = ("pending", "confirmed")   # 未结束
+CLOSED_PLAN_STATUSES = ("completed", "cancelled")
+
 
 # ---------- 工具 ----------
 def row_to_dict(row):
@@ -122,11 +127,19 @@ def pet_detail(pet_id):
            FROM antibody_tests a JOIN vaccines va ON va.id=a.vaccine_id
            WHERE a.pet_id=? ORDER BY a.test_date""", (pet_id,))]
 
+    # 该宠物的随访计划历史
+    followup_plans = [row_to_dict(r) for r in db.execute(
+        """SELECT fp.*, v.name AS vaccine_name
+           FROM followup_plans fp JOIN vaccines v ON v.id=fp.vaccine_id
+           WHERE fp.pet_id=? ORDER BY fp.plan_date DESC, fp.id DESC""",
+        (pet_id,))]
+
     # 每种适用疫苗的当前状态
     coverage = latest_status_for_pet(db, pet_id, pet["species"], pet["birth_date"])
 
     pet["vaccinations"] = vaccinations
     pet["antibodies"] = antibodies
+    pet["followup_plans"] = followup_plans
     pet["vaccine_status"] = coverage
     return jsonify(pet)
 
@@ -251,8 +264,24 @@ def create_vaccination():
          d.get("batch_no", ""), d.get("manufacturer", ""),
          d.get("site", ""), d.get("doctor", ""), reaction,
          next_due, d.get("note", "")))
+
+    # 自动完成该宠物+疫苗最近一条未结束的随访计划（同事务提交）
+    open_plan = db.execute(
+        """SELECT id FROM followup_plans
+           WHERE pet_id=? AND vaccine_id=? AND status IN ('pending','confirmed')
+           ORDER BY id DESC LIMIT 1""",
+        (d["pet_id"], d["vaccine_id"])).fetchone()
+    completed_plan_id = None
+    if open_plan:
+        db.execute(
+            """UPDATE followup_plans SET status='completed',
+                   updated_at=datetime('now','localtime') WHERE id=?""",
+            (open_plan["id"],))
+        completed_plan_id = open_plan["id"]
+
     db.commit()
-    return jsonify({"id": cur.lastrowid, "next_due_date": next_due}), 201
+    return jsonify({"id": cur.lastrowid, "next_due_date": next_due,
+                    "completed_plan_id": completed_plan_id}), 201
 
 
 # ---------- 抗体检测 ----------
@@ -288,6 +317,204 @@ def create_antibody():
          d.get("titer"), d.get("lab", ""), d.get("note", "")))
     db.commit()
     return jsonify({"id": cur.lastrowid}), 201
+
+
+# ---------- 随访计划 ----------
+def get_plan(db, plan_id):
+    return db.execute("SELECT * FROM followup_plans WHERE id=?",
+                      (plan_id,)).fetchone()
+
+
+@app.get("/api/followup-plans")
+def list_followup_plans():
+    """随访计划列表：按状态 / 计划日期区间 / 宠物或主人检索"""
+    db = get_db()
+    status = request.args.get("status", "").strip()
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+    q = request.args.get("q", "").strip()
+    pet_id = request.args.get("pet_id", "").strip()
+
+    sql = """SELECT fp.*, p.name AS pet_name, p.species,
+                    o.name AS owner_name, o.phone AS owner_phone,
+                    v.name AS vaccine_name
+             FROM followup_plans fp
+             JOIN pets p ON p.id = fp.pet_id
+             JOIN owners o ON o.id = p.owner_id
+             JOIN vaccines v ON v.id = fp.vaccine_id
+             WHERE 1=1"""
+    args = []
+    if status:
+        if status not in PLAN_STATUSES:
+            return jsonify({"error": "无效的随访计划状态"}), 400
+        sql += " AND fp.status = ?"
+        args.append(status)
+    if date_from:
+        sql += " AND fp.plan_date >= ?"
+        args.append(date_from)
+    if date_to:
+        sql += " AND fp.plan_date <= ?"
+        args.append(date_to)
+    if pet_id:
+        sql += " AND fp.pet_id = ?"
+        args.append(pet_id)
+    if q:
+        sql += " AND (p.name LIKE ? OR o.name LIKE ? OR o.phone LIKE ?)"
+        args += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    # 未结束的排在前面，按计划日期升序
+    sql += """ ORDER BY CASE WHEN fp.status IN ('pending','confirmed')
+                        THEN 0 ELSE 1 END,
+                        fp.plan_date ASC, fp.id ASC"""
+    return jsonify([row_to_dict(r) for r in db.execute(sql, args)])
+
+
+def validate_plan_item(db, item, idx, seen_pairs):
+    """校验单条批量创建项，返回错误消息（None 表示通过）"""
+    label = f"第{idx}条"
+    for f in ("pet_id", "vaccine_id", "plan_date"):
+        if not item.get(f):
+            return f"{label}：缺少必填字段 {f}"
+    if not (item.get("assignee") or "").strip():
+        return f"{label}：负责人不能为空"
+    try:
+        plan_date = parse_date(item["plan_date"])
+    except (ValueError, TypeError):
+        return f"{label}：计划日期格式应为 YYYY-MM-DD"
+    if plan_date < today():
+        return f"{label}：计划日期不得早于今天"
+    pet = db.execute("SELECT name FROM pets WHERE id=?",
+                     (item["pet_id"],)).fetchone()
+    if not pet:
+        return f"{label}：宠物不存在"
+    vac = db.execute("SELECT name FROM vaccines WHERE id=?",
+                     (item["vaccine_id"],)).fetchone()
+    if not vac:
+        return f"{label}：疫苗不存在"
+    pair = (item["pet_id"], item["vaccine_id"])
+    if pair in seen_pairs:
+        return (f"{label}：同一批次中 {pet['name']} 的 "
+                f"{vac['name']} 重复")
+    seen_pairs.add(pair)
+    dup = db.execute(
+        """SELECT id FROM followup_plans
+           WHERE pet_id=? AND vaccine_id=? AND status IN ('pending','confirmed')""",
+        pair).fetchone()
+    if dup:
+        return (f"{label}：{pet['name']} 的 {vac['name']} "
+                f"已存在未结束的随访计划（#{dup['id']}）")
+    return None
+
+
+@app.post("/api/followup-plans/batch")
+def batch_create_followup_plans():
+    """批量生成随访计划：整体事务，任一记录校验失败则全部回滚"""
+    data = request.get_json(force=True) or {}
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "items 必须是非空数组"}), 400
+
+    db = get_db()
+    db.execute("BEGIN")  # 显式开启事务
+    try:
+        seen_pairs = set()
+        errors = []
+        for i, item in enumerate(items, 1):
+            err = validate_plan_item(db, item, i, seen_pairs)
+            if err:
+                errors.append(err)
+        if errors:
+            db.rollback()
+            return jsonify({"error": f"校验失败，已取消全部创建：{errors[0]}",
+                            "errors": errors}), 400
+
+        ids = []
+        for item in items:
+            cur = db.execute(
+                """INSERT INTO followup_plans(pet_id,vaccine_id,plan_date,
+                       assignee,note,status)
+                   VALUES(?,?,?,?,?,'pending')""",
+                (item["pet_id"], item["vaccine_id"], item["plan_date"],
+                 item["assignee"].strip(), item.get("note", "")))
+            ids.append(cur.lastrowid)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": f"批量创建失败，已全部回滚：{e}"}), 500
+    return jsonify({"created": len(ids), "ids": ids}), 201
+
+
+def ensure_plan_open(plan):
+    """已完成/已取消的计划不得再次修改"""
+    if plan["status"] in CLOSED_PLAN_STATUSES:
+        label = "完成" if plan["status"] == "completed" else "取消"
+        return jsonify({"error": f"该计划已{label}，不能再次修改"}), 400
+    return None
+
+
+@app.post("/api/followup-plans/<int:plan_id>/confirm")
+def confirm_followup_plan(plan_id):
+    db = get_db()
+    plan = get_plan(db, plan_id)
+    if not plan:
+        return jsonify({"error": "随访计划不存在"}), 404
+    err = ensure_plan_open(plan)
+    if err:
+        return err
+    if plan["status"] != "pending":
+        return jsonify({"error": "仅待确认的计划可以确认"}), 400
+    db.execute(
+        """UPDATE followup_plans SET status='confirmed',
+               updated_at=datetime('now','localtime') WHERE id=?""",
+        (plan_id,))
+    db.commit()
+    return jsonify({"id": plan_id, "status": "confirmed"})
+
+
+@app.post("/api/followup-plans/<int:plan_id>/reschedule")
+def reschedule_followup_plan(plan_id):
+    d = request.get_json(force=True) or {}
+    if not d.get("plan_date"):
+        return jsonify({"error": "缺少必填字段 plan_date"}), 400
+    try:
+        plan_date = parse_date(d["plan_date"])
+    except (ValueError, TypeError):
+        return jsonify({"error": "计划日期格式应为 YYYY-MM-DD"}), 400
+    if plan_date < today():
+        return jsonify({"error": "计划日期不得早于今天"}), 400
+    db = get_db()
+    plan = get_plan(db, plan_id)
+    if not plan:
+        return jsonify({"error": "随访计划不存在"}), 404
+    err = ensure_plan_open(plan)
+    if err:
+        return err
+    assignee = (d.get("assignee") or plan["assignee"]).strip()
+    if not assignee:
+        return jsonify({"error": "负责人不能为空"}), 400
+    note = d["note"] if "note" in d else plan["note"]
+    db.execute(
+        """UPDATE followup_plans SET plan_date=?, assignee=?, note=?,
+               updated_at=datetime('now','localtime') WHERE id=?""",
+        (d["plan_date"], assignee, note, plan_id))
+    db.commit()
+    return jsonify({"id": plan_id, "plan_date": d["plan_date"]})
+
+
+@app.post("/api/followup-plans/<int:plan_id>/cancel")
+def cancel_followup_plan(plan_id):
+    db = get_db()
+    plan = get_plan(db, plan_id)
+    if not plan:
+        return jsonify({"error": "随访计划不存在"}), 404
+    err = ensure_plan_open(plan)
+    if err:
+        return err
+    db.execute(
+        """UPDATE followup_plans SET status='cancelled',
+               updated_at=datetime('now','localtime') WHERE id=?""",
+        (plan_id,))
+    db.commit()
+    return jsonify({"id": plan_id, "status": "cancelled"})
 
 
 # ---------- 到期提醒看板 ----------
@@ -434,6 +661,29 @@ def stats():
            WHERE vac.adverse_reaction != '无' AND vac.adverse_reaction != ''
            ORDER BY vac.vacc_date DESC LIMIT 10""")]
 
+    # 6) 随访计划统计：总数 / 七日内待执行 / 完成率
+    plan_rows = db.execute(
+        "SELECT status, plan_date FROM followup_plans").fetchall()
+    plan_total = len(plan_rows)
+    plan_by_status = {s: sum(1 for r in plan_rows if r["status"] == s)
+                      for s in PLAN_STATUSES}
+    today_s = today().isoformat()
+    in7_s = (today() + timedelta(days=7)).isoformat()
+    due_in_7_days = sum(
+        1 for r in plan_rows
+        if r["status"] in OPEN_PLAN_STATUSES
+        and today_s <= r["plan_date"] <= in7_s)
+    followup = {
+        "total": plan_total,
+        "due_in_7_days": due_in_7_days,
+        "completed": plan_by_status["completed"],
+        "pending": plan_by_status["pending"],
+        "confirmed": plan_by_status["confirmed"],
+        "cancelled": plan_by_status["cancelled"],
+        "completion_rate": round(plan_by_status["completed"] / plan_total * 100, 1)
+        if plan_total else 0.0,
+    }
+
     return jsonify({
         "pet_count": db.execute("SELECT COUNT(*) c FROM pets").fetchone()["c"],
         "owner_count": db.execute("SELECT COUNT(*) c FROM owners").fetchone()["c"],
@@ -464,6 +714,7 @@ def stats():
         "monthly": monthly,
         "species_dist": species_dist,
         "recent_reactions": recent_reactions,
+        "followup": followup,
     })
 
 

@@ -3,7 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { petsApi } from '../api'
 import type { Pet } from '../api/types'
-import { fmtDate, RESULT_COLOR, SPECIES_EMOJI, STATUS_META } from '../utils/format'
+import { fmtDate, FOLLOWUP_STATUS_META, RESULT_COLOR, SPECIES_EMOJI, STATUS_META } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -133,6 +133,31 @@ onMounted(async () => {
           </el-card>
         </el-col>
       </el-row>
+
+      <!-- 随访计划历史 -->
+      <el-card class="card-shadow" style="margin-top:16px" header="随访计划">
+        <el-table :data="pet.followup_plans" size="small"
+                  v-if="pet.followup_plans?.length">
+          <el-table-column prop="plan_date" label="计划日期" width="110" />
+          <el-table-column prop="vaccine_name" label="疫苗" min-width="130" />
+          <el-table-column prop="assignee" label="负责人" width="90" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag size="small"
+                :type="(FOLLOWUP_STATUS_META[row.status].type as any)">
+                {{ FOLLOWUP_STATUS_META[row.status].label }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="备注" min-width="160">
+            <template #default="{ row }">{{ row.note || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="最近更新" width="160">
+            <template #default="{ row }">{{ row.updated_at || row.created_at }}</template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="暂无随访计划" :image-size="80" />
+      </el-card>
     </template>
   </div>
 </template>

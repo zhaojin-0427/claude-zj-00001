@@ -161,6 +161,27 @@ def seed():
                          random.choice(LABS),
                          None if result == "阳性" else "建议加强免疫"))
 
+    # 随访计划演示数据：每只被抽中的宠物最多 1 条，避免重复未结束计划
+    PLAN_NOTES = ["电话随访提醒主人预约", "主人要求周末到店接种",
+                  "接种后复查抗体", "上次接种有轻微反应，需重点观察", ""]
+    for pet_id, species, birth in random.sample(pet_ids, k=8):
+        vacs = [v for v in vac_ids if applicable(species, v[2])]
+        if not vacs:
+            continue
+        vid = random.choice(vacs)[0]
+        status = random.choices(
+            ["pending", "confirmed", "completed", "cancelled"],
+            weights=[4, 3, 2, 1])[0]
+        if status in ("pending", "confirmed"):
+            plan_date = today + timedelta(days=random.randint(0, 20))
+        else:
+            plan_date = today - timedelta(days=random.randint(5, 60))
+        cur.execute(
+            "INSERT INTO followup_plans(pet_id,vaccine_id,plan_date,assignee,note,status)"
+            " VALUES(?,?,?,?,?,?)",
+            (pet_id, vid, plan_date.isoformat(), random.choice(DOCTORS),
+             random.choice(PLAN_NOTES), status))
+
     conn.commit()
     conn.close()
     print("演示数据生成完成")

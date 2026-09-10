@@ -26,6 +26,35 @@ const metricCards = computed(() => {
   ]
 })
 
+// 随访计划指标
+const followupCards = computed(() => {
+  if (!stats.value) return []
+  const f = stats.value.followup
+  return [
+    { label: '随访计划总数', value: f.total, suffix: ' 条',
+      sub: `待确认 ${f.pending} · 已确认 ${f.confirmed} · 已取消 ${f.cancelled}`,
+      color: '#409eff', icon: '📋' },
+    { label: '七日内待执行', value: f.due_in_7_days, suffix: ' 条',
+      sub: '未来 7 天内到期的未结束计划',
+      color: '#e6a23c', icon: '⏳' },
+    { label: '随访计划完成率', value: f.completion_rate, suffix: '%',
+      sub: `已完成 ${f.completed} / ${f.total} 条`,
+      color: '#67c23a', icon: '✅' },
+  ]
+})
+
+// 随访计划状态构成
+const followupData = computed(() => ({
+  labels: ['待确认', '已确认', '已完成', '已取消'],
+  datasets: [{
+    data: stats.value
+      ? [stats.value.followup.pending, stats.value.followup.confirmed,
+         stats.value.followup.completed, stats.value.followup.cancelled]
+      : [],
+    backgroundColor: ['#e6a23c', '#409eff', '#67c23a', '#909399'],
+  }],
+}))
+
 // 各疫苗覆盖率
 const coverageData = computed(() => ({
   labels: stats.value?.coverage.map(c => c.vaccine_name) || [],
@@ -149,6 +178,20 @@ onMounted(async () => {
       </el-col>
     </el-row>
 
+    <!-- 随访计划指标 -->
+    <el-row :gutter="16" style="margin-bottom:16px">
+      <el-col v-for="m in followupCards" :key="m.label" :span="8">
+        <div class="stat-card">
+          <div class="icon-box" :style="{ background: m.color }">{{ m.icon }}</div>
+          <div>
+            <div class="stat-value">{{ m.value }}<span style="font-size:15px">{{ m.suffix }}</span></div>
+            <div class="stat-label">{{ m.label }}</div>
+            <div class="stat-sub">{{ m.sub }}</div>
+          </div>
+        </div>
+      </el-col>
+    </el-row>
+
     <el-row :gutter="16" style="margin-bottom:16px">
       <!-- 覆盖率 -->
       <el-col :span="14">
@@ -180,7 +223,7 @@ onMounted(async () => {
     </el-row>
 
     <el-row :gutter="16" style="margin-bottom:16px">
-      <el-col :span="8">
+      <el-col :span="6">
         <el-card class="card-shadow"
           :header="`不良反应构成（总 ${stats?.adverse.total ?? 0} 针次）`">
           <div style="height:250px">
@@ -188,7 +231,7 @@ onMounted(async () => {
           </div>
         </el-card>
       </el-col>
-      <el-col :span="8">
+      <el-col :span="6">
         <el-card class="card-shadow"
           :header="`到期未接种构成（${stats?.overdue.rate ?? 0}%）`">
           <div style="height:250px">
@@ -196,11 +239,19 @@ onMounted(async () => {
           </div>
         </el-card>
       </el-col>
-      <el-col :span="8">
+      <el-col :span="6">
         <el-card class="card-shadow"
           :header="`抗体检测结果构成（${stats?.antibody.total ?? 0} 次）`">
           <div style="height:250px">
             <DoughnutChart :chart-data="antibodyData" :options="donutOptions" />
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="6">
+        <el-card class="card-shadow"
+          :header="`随访计划状态构成（总 ${stats?.followup.total ?? 0} 条）`">
+          <div style="height:250px">
+            <DoughnutChart :chart-data="followupData" :options="donutOptions" />
           </div>
         </el-card>
       </el-col>

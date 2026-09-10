@@ -1,6 +1,7 @@
 import http from './http'
 import type {
   Owner, Pet, Vaccine, Vaccination, AntibodyTest, ReminderItem, Stats,
+  FollowupPlan, FollowupPlanCreate,
 } from './types'
 
 export const ownersApi = {
@@ -39,6 +40,22 @@ export const antibodiesApi = {
 export const remindersApi = {
   list: (params: { status?: string; species?: string; q?: string } = {}) =>
     http.get<ReminderItem[]>('/reminders', { params }).then(r => r.data),
+}
+
+export const followupsApi = {
+  list: (params: {
+    status?: string; date_from?: string; date_to?: string;
+    q?: string; pet_id?: number
+  } = {}) => http.get<FollowupPlan[]>('/followup-plans', { params }).then(r => r.data),
+  batchCreate: (items: FollowupPlanCreate[]) =>
+    http.post<{ created: number; ids: number[] }>('/followup-plans/batch', { items })
+      .then(r => r.data),
+  confirm: (id: number) =>
+    http.post(`/followup-plans/${id}/confirm`).then(r => r.data),
+  reschedule: (id: number, data: { plan_date: string; assignee?: string; note?: string }) =>
+    http.post(`/followup-plans/${id}/reschedule`, data).then(r => r.data),
+  cancel: (id: number) =>
+    http.post(`/followup-plans/${id}/cancel`).then(r => r.data),
 }
 
 export const statsApi = {

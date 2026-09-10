@@ -26,6 +26,7 @@ export interface Pet {
   vaccinations?: Vaccination[]
   antibodies?: AntibodyTest[]
   vaccine_status?: VaccineStatus[]
+  followup_plans?: FollowupPlan[]
 }
 
 export interface Vaccine {
@@ -90,6 +91,34 @@ export interface ReminderItem extends VaccineStatus {
   days_left: number | null
 }
 
+// 随访计划状态：待确认 / 已确认 / 已完成 / 已取消
+export type FollowupStatus = 'pending' | 'confirmed' | 'completed' | 'cancelled'
+
+export interface FollowupPlan {
+  id: number
+  pet_id: number
+  vaccine_id: number
+  plan_date: string
+  assignee: string
+  note?: string
+  status: FollowupStatus
+  created_at?: string
+  updated_at?: string
+  pet_name?: string
+  species?: string
+  owner_name?: string
+  owner_phone?: string
+  vaccine_name?: string
+}
+
+export interface FollowupPlanCreate {
+  pet_id: number
+  vaccine_id: number
+  plan_date: string
+  assignee: string
+  note?: string
+}
+
 export interface CoverageRow {
   vaccine_id: number
   vaccine_name: string
@@ -141,6 +170,15 @@ export interface Stats {
   }
   monthly: { month: string; cnt: number }[]
   species_dist: { species: string; cnt: number }[]
+  followup: {
+    total: number
+    due_in_7_days: number
+    completed: number
+    pending: number
+    confirmed: number
+    cancelled: number
+    completion_rate: number
+  }
   recent_reactions: {
     vacc_date: string
     pet_name: string

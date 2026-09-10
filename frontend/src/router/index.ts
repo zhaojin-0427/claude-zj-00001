@@ -27,6 +27,12 @@ const routes = [
     meta: { title: '到期提醒', icon: 'Bell' },
   },
   {
+    path: '/followups',
+    name: 'followups',
+    component: () => import('../views/FollowupsView.vue'),
+    meta: { title: '随访计划', icon: 'Calendar' },
+  },
+  {
     path: '/antibody',
     name: 'antibody',
     component: () => import('../views/AntibodyView.vue'),

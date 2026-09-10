@@ -11,6 +11,13 @@ export const STATUS_META: Record<string, { label: string; type: string; color: s
   too_young: { label: '未到日龄', type: 'info',    color: '#c0c4cc' },
 }
 
+export const FOLLOWUP_STATUS_META: Record<string, { label: string; type: string; color: string }> = {
+  pending:   { label: '待确认', type: 'warning', color: '#e6a23c' },
+  confirmed: { label: '已确认', type: 'primary', color: '#409eff' },
+  completed: { label: '已完成', type: 'success', color: '#67c23a' },
+  cancelled: { label: '已取消', type: 'info',    color: '#909399' },
+}
+
 export const RESULT_COLOR: Record<string, string> = {
   '阳性': '#67c23a',
   '弱阳性': '#e6a23c',
