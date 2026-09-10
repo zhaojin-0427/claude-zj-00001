@@ -1,7 +1,11 @@
 """宠物疫苗接种档案与到期提醒平台 —— Flask API"""
 from datetime import date, datetime, timedelta
-from flask import Flask, g, jsonify, request
-from flask_cors import CORS
+
+try:
+    from flask import Flask, g, jsonify, request
+    from flask_cors import CORS
+except ImportError:  # 环境未安装 Flask 时使用标准库回退服务器，API 保持一致
+    from stdlib_server import Flask, g, jsonify, request, CORS
 
 from db import get_db, close_db, init_db
 
@@ -391,12 +395,20 @@ def serialize_batch(r, today_s=None):
     d["days_left"] = days_left
     d["status"] = batch_status(d["remaining"], d["warning_threshold"], expiry)
     d["usable"] = d["remaining"] > 0 and days_left >= 0
+    # 兼容旧调用（未关联流水列时即时计算累计入库量）
+    if "total_inbound" not in d:
+        db = get_db()
+        d["total_inbound"] = db.execute(
+            "SELECT COALESCE(SUM(quantity),0) AS q FROM inventory_transactions "
+            "WHERE batch_id=? AND type='inbound'", (d["id"],)).fetchone()["q"]
     return d
 
 
 BATCH_LIST_SQL = """
     SELECT b.*, v.name AS vaccine_name, v.species AS vaccine_species,
-           v.interval_days
+           v.interval_days,
+           (SELECT COALESCE(SUM(quantity),0) FROM inventory_transactions t
+             WHERE t.batch_id = b.id AND t.type = 'inbound') AS total_inbound
     FROM vaccine_batches b
     JOIN vaccines v ON v.id = b.vaccine_id
 """

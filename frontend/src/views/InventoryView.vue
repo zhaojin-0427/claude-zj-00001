@@ -7,6 +7,9 @@ import type { Vaccine, VaccineBatch, BatchCreate, InventoryTransaction } from '.
 import { BATCH_STATUS_META, SPECIES_EMOJI, STOCK_TXN_META } from '../utils/format'
 
 const loading = ref(false)
+// allBatches：不含状态过滤的全量（疫苗/批号过滤仍生效），汇总卡始终统计它；
+// batches：在全量基础上再按状态筛选，仅供表格展示。这样点击状态卡不会改写卡上数量。
+const allBatches = ref<VaccineBatch[]>([])
 const batches = ref<VaccineBatch[]>([])
 const vaccines = ref<Vaccine[]>([])
 
@@ -16,10 +19,10 @@ const filters = reactive({
   status: '',
 })
 
-// ---------- 状态统计 ----------
+// ---------- 状态统计（始终基于未按状态过滤的全量） ----------
 const statusCounts = computed(() => {
   const c = { normal: 0, low: 0, expiring: 0, expired: 0 }
-  for (const b of batches.value) c[b.status]++
+  for (const b of allBatches.value) c[b.status]++
   return c
 })
 
@@ -33,12 +36,15 @@ const summaryCards = computed(() => [
 async function load() {
   loading.value = true
   try {
-    // 状态由后端实时计算；前端按状态过滤时取全量再筛，保证与统计口径一致
-    batches.value = await inventoryApi.batches({
+    // 全量拉取（仅疫苗/批号过滤），状态实时计算在后端完成
+    allBatches.value = await inventoryApi.batches({
       vaccine_id: filters.vaccine_id || undefined,
       batch_no: filters.batch_no || undefined,
-      status: filters.status || undefined,
     })
+    // 表格数据再按状态筛选；切换状态卡无需重新请求，卡上数量保持稳定
+    batches.value = filters.status
+      ? allBatches.value.filter(b => b.status === filters.status)
+      : allBatches.value
   } finally {
     loading.value = false
   }
@@ -193,24 +199,40 @@ const txnLoading = ref(false)
 const txnRows = ref<InventoryTransaction[]>([])
 const txnTitle = ref('全部库存流水')
 const txnTypeFilter = ref('')
+// 当前抽屉锁定的批次；undefined 表示全库流水。独立保存，避免被其他对话框目标污染
+const txnBatchId = ref<number | undefined>(undefined)
 
 async function openTxns(row?: VaccineBatch) {
   txnDrawer.value = true
   txnTypeFilter.value = ''
+  txnBatchId.value = row?.id
   txnTitle.value = row ? `批次流水：${row.vaccine_name} / ${row.batch_no}` : '全部库存流水'
-  await loadTxns(row?.id)
+  await loadTxns()
 }
 
-async function loadTxns(batchId?: number) {
+async function loadTxns() {
   txnLoading.value = true
   try {
     txnRows.value = await inventoryApi.transactions({
-      batch_id: batchId,
+      batch_id: txnBatchId.value,
       type: (txnTypeFilter.value || '') as InventoryTransaction['type'] | '',
     })
   } finally {
     txnLoading.value = false
   }
+}
+
+// 按当前 filters.status 在本地筛选表格（汇总卡数量不受影响）
+function applyStatusFilter() {
+  batches.value = filters.status
+    ? allBatches.value.filter(b => b.status === filters.status)
+    : allBatches.value
+}
+
+// 点击状态卡：同一张卡再点一次取消筛选
+function toggleStatus(key: string) {
+  filters.status = filters.status === key ? '' : key
+  applyStatusFilter()
 }
 
 onMounted(async () => {
@@ -228,7 +250,7 @@ onMounted(async () => {
              :style="{ borderTop: `3px solid ${c.color}`,
                        cursor: 'pointer',
                        outline: filters.status === c.key ? `2px solid ${c.color}` : 'none' }"
-             @click="filters.status = filters.status === c.key ? '' : c.key; load()">
+             @click="toggleStatus(c.key)">
           <div style="font-size:28px;font-weight:700" :style="{ color: c.color }">
             {{ c.value }}
           </div>
@@ -248,7 +270,7 @@ onMounted(async () => {
         <el-input v-model="filters.batch_no" placeholder="批号关键字" clearable
                   style="width:180px" @keyup.enter="load" @clear="load" />
         <el-select v-model="filters.status" placeholder="状态（全部）" clearable
-                   style="width:150px" @change="load">
+                   style="width:150px" @change="applyStatusFilter">
           <el-option v-for="(m, k) in BATCH_STATUS_META" :key="k"
                      :label="m.label" :value="k" />
         </el-select>
@@ -275,12 +297,12 @@ onMounted(async () => {
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="剩余/入库" width="95" align="center">
+        <el-table-column label="剩余/累计入库" width="105" align="center">
           <template #default="{ row }">
             <strong :style="{ color: row.remaining === 0 ? '#909399' : undefined }">
               {{ row.remaining }}
             </strong>
-            / {{ row.initial_quantity }}
+            / {{ row.total_inbound ?? row.initial_quantity }}
           </template>
         </el-table-column>
         <el-table-column prop="warning_threshold" label="预警阈值" width="80" align="center" />
@@ -422,7 +444,7 @@ onMounted(async () => {
     <el-drawer v-model="txnDrawer" :title="txnTitle" size="60%">
       <div style="margin-bottom:10px">
         <el-radio-group v-model="txnTypeFilter" size="small"
-                        @change="loadTxns(opTarget?.id)">
+                        @change="loadTxns()">
           <el-radio-button label="">全部</el-radio-button>
           <el-radio-button label="inbound">入库</el-radio-button>
           <el-radio-button label="consume">消耗</el-radio-button>

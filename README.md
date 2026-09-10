@@ -25,6 +25,11 @@ python3 seed.py     # 初始化数据库并写入演示数据（8 位主人 / 14
 python3 app.py      # http://localhost:5000
 ```
 
+> 后端优先使用 Flask；当环境**未安装 Flask**（如离线容器）时，`python3 app.py`
+> 会自动切换到零依赖的标准库服务器（`stdlib_server.py`，基于 `http.server`），
+> 接口路径、参数与返回结构与 Flask 版本完全一致，可直接被前端代理调用。
+> 生产环境仍建议安装 `requirements.txt` 中的 Flask。
+
 ### 2. 前端（端口 5173）
 
 ```bash

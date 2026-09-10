@@ -4,12 +4,15 @@ from pathlib import Path
 
 try:  # 运行 seed/独立脚本时不强制安装 Flask
     from flask import g
-except ImportError:  # pragma: no cover
-    class _GStub:
-        """无 Flask 环境下的最小 g：仅承载本请求连接"""
-        pass
+except ImportError:
+    try:  # 优先复用标准库回退服务器的请求级 g
+        from stdlib_server import g
+    except ImportError:  # pragma: no cover - 纯独立脚本场景
+        class _GStub:
+            """无 Flask 环境下的最小 g：仅承载本请求连接"""
+            pass
 
-    g = _GStub()
+        g = _GStub()
 
 DB_PATH = Path(__file__).parent / "data.db"
 
@@ -127,9 +130,12 @@ CREATE TABLE IF NOT EXISTS followup_plans (
 
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        # WAL + busy_timeout：降低单文件 SQLite 在并发/读写重叠时的锁冲突
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
         g.db = conn
     return g.db
 

@@ -71,6 +71,7 @@ export interface VaccineBatch {
   expiry_date: string
   initial_quantity: number
   remaining: number
+  total_inbound?: number
   warning_threshold: number
   operator: string
   note?: string
