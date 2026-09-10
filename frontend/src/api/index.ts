@@ -1,7 +1,8 @@
 import http from './http'
 import type {
   Owner, Pet, Vaccine, Vaccination, AntibodyTest, ReminderItem, Stats,
-  FollowupPlan, FollowupPlanCreate,
+  FollowupPlan, FollowupPlanCreate, VaccineBatch, BatchCreate,
+  InventoryTransaction, StockTxnType,
 } from './types'
 
 export const ownersApi = {
@@ -60,4 +61,35 @@ export const followupsApi = {
 
 export const statsApi = {
   get: () => http.get<Stats>('/stats').then(r => r.data),
+}
+
+export const inventoryApi = {
+  batches: (params: {
+    vaccine_id?: number | string
+    batch_no?: string
+    status?: string
+    species?: string
+    usable?: boolean
+  } = {}) =>
+    http.get<VaccineBatch[]>('/inventory/batches', {
+      params: {
+        vaccine_id: params.vaccine_id,
+        batch_no: params.batch_no,
+        status: params.status,
+        species: params.species,
+        usable: params.usable === undefined ? undefined : (params.usable ? 1 : 0),
+      },
+    }).then(r => r.data),
+  createBatch: (data: BatchCreate) =>
+    http.post<{ id: number; remaining: number }>('/inventory/batches', data)
+      .then(r => r.data),
+  restock: (id: number, data: { quantity: number; reason: string; operator: string }) =>
+    http.post<{ id: number; remaining: number }>(
+      `/inventory/batches/${id}/restock`, data).then(r => r.data),
+  adjust: (id: number, data: { change: number; reason: string; operator: string }) =>
+    http.post<{ id: number; remaining: number }>(
+      `/inventory/batches/${id}/adjust`, data).then(r => r.data),
+  transactions: (params: { batch_id?: number; type?: StockTxnType | '' } = {}) =>
+    http.get<InventoryTransaction[]>('/inventory/transactions', { params })
+      .then(r => r.data),
 }

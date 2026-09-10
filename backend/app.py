@@ -11,11 +11,17 @@ app.teardown_appcontext(close_db)
 
 SOON_DAYS = 30        # 30 天内到期视为"即将到期"
 FIRST_VAC_AGE = 60    # 超过 60 日龄纳入应接种统计
+EXPIRE_SOON_DAYS = 30  # 库存批次 30 天内到期视为"临期"
 
 # 随访计划状态：pending 待确认 / confirmed 已确认 / completed 已完成 / cancelled 已取消
 PLAN_STATUSES = ("pending", "confirmed", "completed", "cancelled")
 OPEN_PLAN_STATUSES = ("pending", "confirmed")   # 未结束
 CLOSED_PLAN_STATUSES = ("completed", "cancelled")
+
+# 库存流水类型：inbound 入库补充 / consume 接种消耗 / adjust 库存调整
+STOCK_TXN_TYPES = ("inbound", "consume", "adjust")
+# 库存批次实时状态：normal 正常 / low 低库存 / expiring 临期 / expired 已过期
+BATCH_STATUSES = ("normal", "low", "expiring", "expired")
 
 
 # ---------- 工具 ----------
@@ -29,6 +35,35 @@ def parse_date(s):
 
 def today():
     return date.today()
+
+
+def parse_positive_int(value, field, allow_zero=False):
+    """解析正整数（allow_zero 时允许 0），失败抛出 ValueError(中文消息)"""
+    if isinstance(value, bool) or isinstance(value, float) \
+            or (isinstance(value, str)
+                and not value.strip().lstrip("+").isdigit()):
+        raise ValueError(f"{field}必须为{'非负' if allow_zero else '正'}整数")
+    try:
+        n = int(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"{field}必须为{'非负' if allow_zero else '正'}整数")
+    if n < 0 or (n == 0 and not allow_zero):
+        raise ValueError(f"{field}必须为{'非负' if allow_zero else '正'}整数")
+    return n
+
+
+def batch_status(remaining, warning_threshold, expiry_d):
+    """按剩余数量与有效期实时计算批次状态。
+
+    优先级：已过期 > 临期（30 天内到期）> 低库存（剩余 ≤ 预警阈值）> 正常。
+    """
+    if expiry_d < today():
+        return "expired"
+    if (expiry_d - today()).days <= EXPIRE_SOON_DAYS:
+        return "expiring"
+    if remaining <= warning_threshold:
+        return "low"
+    return "normal"
 
 
 def vac_status(next_due: str | None, has_record: bool, pet_birth: str):
@@ -238,7 +273,7 @@ def list_vaccinations():
 @app.post("/api/vaccinations")
 def create_vaccination():
     d = request.get_json(force=True)
-    for f in ["pet_id", "vaccine_id", "vacc_date"]:
+    for f in ["pet_id", "vaccine_id", "vacc_date", "batch_id"]:
         if not d.get(f):
             return jsonify({"error": f"缺少必填字段 {f}"}), 400
     try:
@@ -247,6 +282,11 @@ def create_vaccination():
         return jsonify({"error": "接种日期格式应为 YYYY-MM-DD"}), 400
     if vacc_date > today():
         return jsonify({"error": "接种日期不得晚于今天"}), 400
+    try:
+        batch_id = parse_positive_int(d["batch_id"], "库存批次")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     db = get_db()
     vac = db.execute("SELECT * FROM vaccines WHERE id=?",
                      (d["vaccine_id"],)).fetchone()
@@ -254,6 +294,20 @@ def create_vaccination():
                      (d["pet_id"],)).fetchone()
     if not vac or not pet:
         return jsonify({"error": "宠物或疫苗不存在"}), 400
+    # 批次必须与宠物物种匹配（通用疫苗批次对所有物种适用）
+    batch = db.execute(
+        "SELECT * FROM vaccine_batches WHERE id=?", (batch_id,)).fetchone()
+    if not batch:
+        return jsonify({"error": "库存批次不存在"}), 400
+    if batch["vaccine_id"] != vac["id"]:
+        return jsonify({"error": "所选批次与疫苗不匹配"}), 400
+    if vac["species"] != "通用" and vac["species"] != pet["species"]:
+        return jsonify({"error": f"该疫苗不适用于物种：{pet['species']}"}), 400
+    expiry = parse_date(batch["expiry_date"])
+    if expiry < today():
+        return jsonify({"error": f"批次 {batch['batch_no']} 已过期，不能接种"}), 400
+    if batch["remaining"] <= 0:
+        return jsonify({"error": f"批次 {batch['batch_no']} 库存不足"}), 400
 
     # 自动计算下次到期日：接种日 + 疫苗标准间隔（也允许前端传入覆盖）
     next_due = d.get("next_due_date")
@@ -268,32 +322,333 @@ def create_vaccination():
             return jsonify({"error": "下次接种日期不得早于本次接种日期"}), 400
 
     reaction = d.get("adverse_reaction", "无") or "无"
-    cur = db.execute(
-        """INSERT INTO vaccinations(pet_id,vaccine_id,vacc_date,batch_no,
-               manufacturer,site,doctor,adverse_reaction,next_due_date,note)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (d["pet_id"], d["vaccine_id"], d["vacc_date"],
-         d.get("batch_no", ""), d.get("manufacturer", ""),
-         d.get("site", ""), d.get("doctor", ""), reaction,
-         next_due, d.get("note", "")))
 
-    # 自动完成该宠物+疫苗最近一条未结束的随访计划（同事务提交）
-    open_plan = db.execute(
-        """SELECT id FROM followup_plans
-           WHERE pet_id=? AND vaccine_id=? AND status IN ('pending','confirmed')
-           ORDER BY id DESC LIMIT 1""",
-        (d["pet_id"], d["vaccine_id"])).fetchone()
-    completed_plan_id = None
-    if open_plan:
+    # 接种记录创建、库存扣减、流水写入在同一 SQLite 事务中完成，
+    # 任一步失败全部回滚，不产生负库存，也不会重复扣减
+    db.execute("BEGIN")
+    try:
+        cur = db.execute(
+            """INSERT INTO vaccinations(pet_id,vaccine_id,vacc_date,batch_no,
+                   manufacturer,site,doctor,adverse_reaction,next_due_date,note,
+                   batch_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (d["pet_id"], d["vaccine_id"], d["vacc_date"],
+             # 批号、厂家以库存批次登记信息为准，避免前端篡改
+             batch["batch_no"], batch["manufacturer"],
+             d.get("site", ""), d.get("doctor", ""), reaction,
+             next_due, d.get("note", ""), batch_id))
+        vac_id = cur.lastrowid
+        new_remaining = batch["remaining"] - 1
+
+        # 条件更新：仅当剩余数量仍 > 0 时扣减成功，数据库层面杜绝负库存
+        upd = db.execute(
+            "UPDATE vaccine_batches SET remaining = remaining - 1 "
+            "WHERE id=? AND remaining > 0", (batch_id,))
+        if upd.rowcount != 1:
+            db.rollback()
+            return jsonify({"error": f"批次 {batch['batch_no']} 库存不足"}), 400
+
+        # 唯一索引 uq_txn_vaccination 保证同一接种记录不会重复写消耗流水
         db.execute(
-            """UPDATE followup_plans SET status='completed',
-                   updated_at=datetime('now','localtime') WHERE id=?""",
-            (open_plan["id"],))
-        completed_plan_id = open_plan["id"]
+            """INSERT INTO inventory_transactions(batch_id,vaccination_id,type,
+                   quantity,delta,remaining_after,reason,operator)
+               VALUES(?,?,'consume',1,-1,?,?,?)""",
+            (batch_id, vac_id, new_remaining,
+             f"接种消耗：{pet['name']} / {vac['name']}",
+             (d.get("doctor") or "").strip() or "接种医生"))
 
-    db.commit()
-    return jsonify({"id": cur.lastrowid, "next_due_date": next_due,
+        # 自动完成该宠物+疫苗最近一条未结束的随访计划（同事务提交）
+        open_plan = db.execute(
+            """SELECT id FROM followup_plans
+               WHERE pet_id=? AND vaccine_id=? AND status IN ('pending','confirmed')
+               ORDER BY id DESC LIMIT 1""",
+            (d["pet_id"], d["vaccine_id"])).fetchone()
+        completed_plan_id = None
+        if open_plan:
+            db.execute(
+                """UPDATE followup_plans SET status='completed',
+                       updated_at=datetime('now','localtime') WHERE id=?""",
+                (open_plan["id"],))
+            completed_plan_id = open_plan["id"]
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        # 唯一索引冲突等（如重复扣减）
+        return jsonify({"error": f"接种登记失败，已全部回滚：{e}"}), 400
+    return jsonify({"id": vac_id, "next_due_date": next_due,
+                    "batch_no": batch["batch_no"],
+                    "manufacturer": batch["manufacturer"],
+                    "remaining": new_remaining,
                     "completed_plan_id": completed_plan_id}), 201
+
+
+# ---------- 疫苗库存批次 ----------
+def serialize_batch(r, today_s=None):
+    d = row_to_dict(r)
+    expiry = parse_date(d["expiry_date"])
+    days_left = (expiry - today()).days
+    d["days_left"] = days_left
+    d["status"] = batch_status(d["remaining"], d["warning_threshold"], expiry)
+    d["usable"] = d["remaining"] > 0 and days_left >= 0
+    return d
+
+
+BATCH_LIST_SQL = """
+    SELECT b.*, v.name AS vaccine_name, v.species AS vaccine_species,
+           v.interval_days
+    FROM vaccine_batches b
+    JOIN vaccines v ON v.id = b.vaccine_id
+"""
+
+
+@app.get("/api/inventory/batches")
+def list_inventory_batches():
+    """库存批次列表：按疫苗 / 批号 / 状态检索，可只取可用批次"""
+    db = get_db()
+    vaccine_id = request.args.get("vaccine_id", "").strip()
+    batch_no = request.args.get("batch_no", "").strip()
+    status = request.args.get("status", "").strip()
+    species = request.args.get("species", "").strip()
+    usable = request.args.get("usable", "").strip()
+
+    if status and status not in BATCH_STATUSES:
+        return jsonify({"error": "无效的批次状态"}), 400
+
+    sql = BATCH_LIST_SQL + " WHERE 1=1"
+    args = []
+    if vaccine_id:
+        sql += " AND b.vaccine_id = ?"
+        args.append(vaccine_id)
+    if batch_no:
+        sql += " AND b.batch_no LIKE ?"
+        args.append(f"%{batch_no}%")
+    if species:
+        sql += " AND (v.species='通用' OR v.species=?)"
+        args.append(species)
+
+    rows = [serialize_batch(r) for r in db.execute(sql, args)]
+    if usable in ("1", "true", "yes"):
+        rows = [r for r in rows if r["usable"]]
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+
+    # 默认排序：已过期沉底，临期/低库存优先，再按有效期升序
+    order = {"expired": 3, "expiring": 0, "low": 1, "normal": 2}
+    rows.sort(key=lambda r: (order.get(r["status"], 9), r["expiry_date"], r["id"]))
+    return jsonify(rows)
+
+
+def validate_batch_fields(d):
+    """校验登记/入库字段，返回 (values_dict, error)"""
+    result = {}
+    for f in ("vaccine_id", "batch_no", "manufacturer",
+              "production_date", "expiry_date", "operator"):
+        val = d.get(f)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return None, f"缺少必填字段 {f}"
+        result[f] = str(val).strip() if isinstance(val, str) else val
+    try:
+        result["vaccine_id"] = parse_positive_int(result["vaccine_id"], "疫苗")
+    except ValueError as e:
+        return None, str(e)
+    try:
+        prod = parse_date(result["production_date"])
+        exp = parse_date(result["expiry_date"])
+    except (ValueError, TypeError):
+        return None, "生产日期与有效期格式应为 YYYY-MM-DD"
+    if exp < prod:
+        return None, "有效期不得早于生产日期"
+    result["production_date"] = prod.isoformat()
+    result["expiry_date"] = exp.isoformat()
+    result["threshold"] = parse_nonneg(
+        d.get("warning_threshold", 10), "预警阈值")
+    result["note"] = (d.get("note") or "").strip()
+    return result, None
+
+
+def parse_nonneg(value, field):
+    n = parse_positive_int(value, field, allow_zero=True)
+    return n
+
+
+@app.post("/api/inventory/batches")
+def create_inventory_batch():
+    """登记新的疫苗库存批次（首次入库）"""
+    d = request.get_json(force=True) or {}
+    v, err = validate_batch_fields(d)
+    if err:
+        return jsonify({"error": err}), 400
+    try:
+        quantity = parse_positive_int(d.get("quantity"), "入库数量")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    db = get_db()
+    if not db.execute("SELECT 1 FROM vaccines WHERE id=?",
+                      (v["vaccine_id"],)).fetchone():
+        return jsonify({"error": "疫苗不存在"}), 400
+    dup = db.execute(
+        "SELECT id FROM vaccine_batches WHERE vaccine_id=? AND lower(batch_no)=?",
+        (v["vaccine_id"], v["batch_no"].lower())).fetchone()
+    if dup:
+        return jsonify({"error": "该疫苗已存在相同批号的批次，不能重复登记"}), 400
+
+    db.execute("BEGIN")
+    try:
+        cur = db.execute(
+            """INSERT INTO vaccine_batches(vaccine_id,batch_no,manufacturer,
+                   production_date,expiry_date,initial_quantity,remaining,
+                   warning_threshold,operator,note)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (v["vaccine_id"], v["batch_no"], v["manufacturer"],
+             v["production_date"], v["expiry_date"], quantity, quantity,
+             v["threshold"], v["operator"], v["note"]))
+        batch_id = cur.lastrowid
+        db.execute(
+            """INSERT INTO inventory_transactions(batch_id,type,quantity,delta,
+                   remaining_after,reason,operator)
+               VALUES(?,'inbound',?,?,?,?,?)""",
+            (batch_id, quantity, quantity, quantity,
+             v["note"] or "首次入库", v["operator"]))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": f"登记失败，已回滚：{e}"}), 400
+    return jsonify({"id": batch_id, "remaining": quantity}), 201
+
+
+def _load_batch(db, batch_id):
+    return db.execute(BATCH_LIST_SQL + " WHERE b.id=?",
+                      (batch_id,)).fetchone()
+
+
+@app.post("/api/inventory/batches/<int:batch_id>/restock")
+def restock_batch(batch_id):
+    """入库补充：数量为正整数，必须填写原因"""
+    d = request.get_json(force=True) or {}
+    try:
+        quantity = parse_positive_int(d.get("quantity"), "入库数量")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    reason = (d.get("reason") or "").strip()
+    operator = (d.get("operator") or "").strip()
+    if not reason:
+        return jsonify({"error": "请填写入库原因"}), 400
+    if not operator:
+        return jsonify({"error": "缺少必填字段 operator"}), 400
+
+    db = get_db()
+    batch = _load_batch(db, batch_id)
+    if not batch:
+        return jsonify({"error": "库存批次不存在"}), 404
+    if parse_date(batch["expiry_date"]) < today():
+        return jsonify({"error": "批次已过期，不能继续入库补充"}), 400
+
+    db.execute("BEGIN")
+    try:
+        upd = db.execute(
+            "UPDATE vaccine_batches SET remaining = remaining + ? WHERE id=?",
+            (quantity, batch_id))
+        if upd.rowcount != 1:
+            raise RuntimeError("更新批次失败")
+        row = db.execute("SELECT remaining FROM vaccine_batches WHERE id=?",
+                         (batch_id,)).fetchone()
+        db.execute(
+            """INSERT INTO inventory_transactions(batch_id,type,quantity,delta,
+                   remaining_after,reason,operator)
+               VALUES(?,'inbound',?,?,?,?,?)""",
+            (batch_id, quantity, quantity, row["remaining"], reason, operator))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": f"入库失败，已回滚：{e}"}), 400
+    return jsonify({"id": batch_id, "remaining": row["remaining"]})
+
+
+@app.post("/api/inventory/batches/<int:batch_id>/adjust")
+def adjust_batch(batch_id):
+    """库存调整（盘盈/盘耗等）：change 为带符号整数，不得调出负库存，必须填写原因"""
+    d = request.get_json(force=True) or {}
+    if d.get("change") is None:
+        return jsonify({"error": "缺少必填字段 change"}), 400
+    try:
+        change = int(d["change"])
+    except (ValueError, TypeError):
+        return jsonify({"error": "调整数量必须为整数"}), 400
+    if change == 0:
+        return jsonify({"error": "调整数量不能为 0"}), 400
+    reason = (d.get("reason") or "").strip()
+    operator = (d.get("operator") or "").strip()
+    if not reason:
+        return jsonify({"error": "请填写调整原因"}), 400
+    if not operator:
+        return jsonify({"error": "缺少必填字段 operator"}), 400
+
+    db = get_db()
+    batch = _load_batch(db, batch_id)
+    if not batch:
+        return jsonify({"error": "库存批次不存在"}), 404
+    if batch["remaining"] + change < 0:
+        return jsonify({"error":
+                        f"调整后库存为负（当前剩余 {batch['remaining']}），"
+                        "已拒绝调整"}), 400
+
+    db.execute("BEGIN")
+    try:
+        # 条件更新兜底，数据库层面禁止负库存
+        if change > 0:
+            upd = db.execute(
+                "UPDATE vaccine_batches SET remaining = remaining + ? WHERE id=?",
+                (change, batch_id))
+        else:
+            upd = db.execute(
+                "UPDATE vaccine_batches SET remaining = remaining - ? "
+                "WHERE id=? AND remaining >= ?",
+                (-change, batch_id, -change))
+        if upd.rowcount != 1:
+            db.rollback()
+            return jsonify({"error": "库存不足，调整后将出现负库存，已拒绝"}), 400
+        row = db.execute("SELECT remaining FROM vaccine_batches WHERE id=?",
+                         (batch_id,)).fetchone()
+        db.execute(
+            """INSERT INTO inventory_transactions(batch_id,type,quantity,delta,
+                   remaining_after,reason,operator)
+               VALUES(?,'adjust',?,?,?,?,?)""",
+            (batch_id, abs(change), change, row["remaining"], reason, operator))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": f"调整失败，已回滚：{e}"}), 400
+    return jsonify({"id": batch_id, "remaining": row["remaining"]})
+
+
+@app.get("/api/inventory/transactions")
+def list_inventory_transactions():
+    """库存流水：可按批次 / 类型过滤，最新在前"""
+    db = get_db()
+    batch_id = request.args.get("batch_id", "").strip()
+    ttype = request.args.get("type", "").strip()
+    sql = """SELECT t.*, b.batch_no, b.manufacturer, v.name AS vaccine_name,
+                    v.species AS vaccine_species,
+                    p.name AS pet_name
+             FROM inventory_transactions t
+             JOIN vaccine_batches b ON b.id = t.batch_id
+             JOIN vaccines v ON v.id = b.vaccine_id
+             LEFT JOIN vaccinations vac ON vac.id = t.vaccination_id
+             LEFT JOIN pets p ON p.id = vac.pet_id
+             WHERE 1=1"""
+    args = []
+    if batch_id:
+        sql += " AND t.batch_id = ?"
+        args.append(batch_id)
+    if ttype:
+        if ttype not in STOCK_TXN_TYPES:
+            return jsonify({"error": "无效的流水类型"}), 400
+        sql += " AND t.type = ?"
+        args.append(ttype)
+    sql += " ORDER BY t.id DESC LIMIT 500"
+    return jsonify([row_to_dict(r) for r in db.execute(sql, args)])
 
 
 # ---------- 抗体检测 ----------
@@ -582,6 +937,50 @@ def reminders():
 
 
 # ---------- 统计页 ----------
+def inventory_stats(db):
+    """库存统计：总量 / 临期数量 / 低库存批次数 / 本月消耗量（状态实时计算）"""
+    batches = db.execute(
+        "SELECT remaining, warning_threshold, expiry_date FROM vaccine_batches"
+    ).fetchall()
+    stock_total = stock_valid = expiring_soon_qty = 0
+    low_count = expiring_count = expired_count = batch_count = 0
+    in30 = today() + timedelta(days=EXPIRE_SOON_DAYS)
+    for b in batches:
+        batch_count += 1
+        expiry = parse_date(b["expiry_date"])
+        remaining = b["remaining"]
+        stock_total += remaining
+        if expiry < today():
+            expired_count += 1
+            continue  # 已过期批次不计入可用库存与临期数量
+        stock_valid += remaining
+        st = batch_status(remaining, b["warning_threshold"], expiry)
+        if st == "expiring":
+            expiring_count += 1
+            expiring_soon_qty += remaining
+        elif st == "low":
+            low_count += 1
+
+    # 本月消耗量：本月接种消耗流水数量合计（不含调整盘亏）
+    month_prefix = today().isoformat()[:7]
+    consumed_row = db.execute(
+        """SELECT COALESCE(SUM(quantity),0) AS qty, COUNT(*) AS times
+           FROM inventory_transactions
+           WHERE type='consume' AND substr(created_at,1,7)=?""",
+        (month_prefix,)).fetchone()
+    return {
+        "batch_count": batch_count,
+        "stock_total": stock_total,          # 当前库存总量（含已过期批次剩余）
+        "stock_valid": stock_valid,          # 未过期批次可用库存
+        "expiring_soon_qty": expiring_soon_qty,   # 30 天内临期数量（剩余支数）
+        "expiring_soon_batches": expiring_count,  # 临期批次数
+        "low_batch_count": low_count,             # 低库存批次数
+        "expired_batch_count": expired_count,     # 已过期批次数
+        "month_consumed": consumed_row["qty"],    # 本月消耗量（支）
+        "month_consume_times": consumed_row["times"],
+    }
+
+
 @app.get("/api/stats")
 def stats():
     db = get_db()
@@ -708,6 +1107,9 @@ def stats():
         if plan_total else 0.0,
     }
 
+    # 7) 疫苗库存指标：当前库存总量 / 30 天内临期数量 / 低库存批次数 / 本月消耗量
+    inventory = inventory_stats(db)
+
     return jsonify({
         "pet_count": db.execute("SELECT COUNT(*) c FROM pets").fetchone()["c"],
         "owner_count": db.execute("SELECT COUNT(*) c FROM owners").fetchone()["c"],
@@ -739,6 +1141,7 @@ def stats():
         "species_dist": species_dist,
         "recent_reactions": recent_reactions,
         "followup": followup,
+        "inventory": inventory,
     })
 
 

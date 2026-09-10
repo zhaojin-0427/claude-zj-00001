@@ -30,6 +30,20 @@ export const SPECIES_EMOJI: Record<string, string> = {
   '兔': '🐇',
 }
 
+// 库存批次实时状态（按剩余数量与有效期计算）
+export const BATCH_STATUS_META: Record<string, { label: string; color: string }> = {
+  normal:   { label: '正常', color: '#67c23a' },
+  low:      { label: '低库存', color: '#409eff' },
+  expiring: { label: '临期', color: '#e6a23c' },
+  expired:  { label: '已过期', color: '#f56c6c' },
+}
+
+export const STOCK_TXN_META: Record<string, { label: string; type: string }> = {
+  inbound: { label: '入库', type: 'success' },
+  consume: { label: '消耗', type: 'danger' },
+  adjust:  { label: '调整', type: 'warning' },
+}
+
 export function daysText(days: number | null): string {
   if (days === null || days === undefined) return '—'
   if (days < 0) return `逾期 ${-days} 天`

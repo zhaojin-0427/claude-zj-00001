@@ -1,7 +1,15 @@
 """数据库初始化与连接（SQLite，无需外部服务）"""
 import sqlite3
 from pathlib import Path
-from flask import g
+
+try:  # 运行 seed/独立脚本时不强制安装 Flask
+    from flask import g
+except ImportError:  # pragma: no cover
+    class _GStub:
+        """无 Flask 环境下的最小 g：仅承载本请求连接"""
+        pass
+
+    g = _GStub()
 
 DB_PATH = Path(__file__).parent / "data.db"
 
@@ -49,8 +57,46 @@ CREATE TABLE IF NOT EXISTS vaccinations (
     adverse_reaction  TEXT,              -- 不良反应：无/轻微/严重 + 描述
     next_due_date     TEXT,              -- 建议下次接种日期
     note              TEXT,
+    batch_id          INTEGER REFERENCES vaccine_batches(id),  -- 扣减的库存批次（历史记录可为空）
     created_at        TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+-- 疫苗库存批次：同一疫苗 + 同一批号不得重复
+CREATE TABLE IF NOT EXISTS vaccine_batches (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    vaccine_id       INTEGER NOT NULL REFERENCES vaccines(id),
+    batch_no         TEXT NOT NULL,          -- 批号
+    manufacturer     TEXT NOT NULL,          -- 生产厂家
+    production_date  TEXT NOT NULL,          -- 生产日期 YYYY-MM-DD
+    expiry_date      TEXT NOT NULL,          -- 有效期至 YYYY-MM-DD
+    initial_quantity INTEGER NOT NULL CHECK(initial_quantity > 0),  -- 首次入库数量
+    remaining        INTEGER NOT NULL CHECK(remaining >= 0),        -- 当前剩余数量（禁止负库存）
+    warning_threshold INTEGER NOT NULL DEFAULT 10 CHECK(warning_threshold >= 0),  -- 低库存预警阈值
+    operator         TEXT NOT NULL,          -- 登记操作人
+    note             TEXT,                   -- 备注
+    created_at       TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    CHECK(date(expiry_date) >= date(production_date))  -- 有效期不得早于生产日期
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_batch_vaccine_no
+    ON vaccine_batches(vaccine_id, lower(batch_no));
+
+-- 库存流水：入库 inbound / 接种消耗 consume / 调整 adjust
+CREATE TABLE IF NOT EXISTS inventory_transactions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id         INTEGER NOT NULL REFERENCES vaccine_batches(id),
+    vaccination_id   INTEGER REFERENCES vaccinations(id),  -- 仅 consume 类型有值
+    type             TEXT NOT NULL CHECK(type IN ('inbound','consume','adjust')),
+    quantity         INTEGER NOT NULL CHECK(quantity > 0),       -- 变动数量（正整数）
+    delta            INTEGER NOT NULL,                           -- 对库存的带符号增减
+    remaining_after  INTEGER NOT NULL CHECK(remaining_after >= 0),  -- 变动后结余
+    reason           TEXT NOT NULL,          -- 变动原因
+    operator         TEXT NOT NULL,          -- 操作人
+    created_at       TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+-- 同一接种记录至多一条消耗流水：防止重复扣减
+CREATE UNIQUE INDEX IF NOT EXISTS uq_txn_vaccination
+    ON inventory_transactions(vaccination_id)
+    WHERE vaccination_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS antibody_tests (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,7 +133,6 @@ def get_db() -> sqlite3.Connection:
         g.db = conn
     return g.db
 
-
 def close_db(exc=None):
     db = g.pop("db", None)
     if db is not None:
@@ -97,5 +142,9 @@ def close_db(exc=None):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    # 旧库迁移：vaccinations 增加 batch_id 列（历史接种记录保持兼容，允许为空）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(vaccinations)")}
+    if "batch_id" not in cols:
+        conn.execute("ALTER TABLE vaccinations ADD COLUMN batch_id INTEGER")
     conn.commit()
     conn.close()

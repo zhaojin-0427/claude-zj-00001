@@ -1,7 +1,7 @@
 """生成演示数据：主人、宠物、疫苗、接种记录、抗体检测"""
 import sqlite3
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from db import DB_PATH, init_db
 
@@ -77,9 +77,14 @@ def seed():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # 已存在数据则跳过
+    # 已存在基础数据则跳过（库存批次仍幂等补充）
     if cur.execute("SELECT COUNT(*) FROM owners").fetchone()[0] > 0:
-        print("数据已存在，跳过种子")
+        print("基础数据已存在，跳过种子")
+        vac_rows = cur.execute(
+            "SELECT id, name, species, interval_days, core FROM vaccines"
+        ).fetchall()
+        seed_inventory(cur, [tuple(r) for r in vac_rows])
+        conn.commit()
         conn.close()
         return
 
@@ -182,9 +187,86 @@ def seed():
             (pet_id, vid, plan_date.isoformat(), random.choice(DOCTORS),
              random.choice(PLAN_NOTES), status))
 
+    seed_inventory(cur, vac_ids)
+
     conn.commit()
     conn.close()
     print("演示数据生成完成")
+
+
+# ---------- 疫苗库存演示数据 ----------
+# 每个疫苗生成多个批次，覆盖 正常 / 低库存 / 临期 / 已过期 四种状态
+def seed_inventory(cur, vac_ids):
+    if cur.execute("SELECT COUNT(*) FROM vaccine_batches").fetchone()[0] > 0:
+        return
+
+    today = date.today()
+    batch_seq = 1000
+    # 本月已消耗（支）：写入 consume 流水，使"本月消耗量"有演示数据
+    CONSUMED_PER_VAC = [2, 1, 3, 2, 1, 2, 1, 2]
+
+    for idx, (vid, vname, vspecies, interval, core) in enumerate(vac_ids):
+        manufacturer = random.choice(MANUFACTURERS)
+
+        def add_batch(remain, prod_offset, exp_offset, threshold, note,
+                      consumed=0):
+            """remain=当前剩余；consumed=本批次本月已消耗（会同时写消耗流水）"""
+            nonlocal batch_seq
+            batch_seq += 1
+            prod = today - timedelta(days=prod_offset)
+            exp = today + timedelta(days=exp_offset)
+            received = remain + consumed
+            cur.execute(
+                "INSERT INTO vaccine_batches(vaccine_id,batch_no,manufacturer,"
+                "production_date,expiry_date,initial_quantity,remaining,"
+                "warning_threshold,operator,note)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (vid, f"B{prod.year}{batch_seq}", manufacturer,
+                 prod.isoformat(), exp.isoformat(), received, remain,
+                 threshold, "库管小陈", note))
+            bid = cur.lastrowid
+            cur.execute(
+                "INSERT INTO inventory_transactions(batch_id,type,quantity,delta,"
+                "remaining_after,reason,operator,created_at)"
+                " VALUES(?,'inbound',?,?,?,?,?,?)",
+                (bid, received, received, received, "首次入库",
+                 "库管小陈",
+                 datetime.combine(prod, datetime.min.time()).strftime(
+                     "%Y-%m-%d %H:%M:%S")))
+            # 本月消耗流水：时间从前到后，结余逐条递减
+            after = received
+            used_days = sorted((random.randint(0, 27) for _ in range(consumed)),
+                               reverse=True)
+            for offset_day in used_days:
+                day = today - timedelta(days=offset_day)
+                created = datetime.combine(day, datetime.min.time()).replace(
+                    hour=random.randint(9, 17)).strftime("%Y-%m-%d %H:%M:%S")
+                after -= 1
+                cur.execute(
+                    "INSERT INTO inventory_transactions(batch_id,type,quantity,"
+                    "delta,remaining_after,reason,operator,created_at)"
+                    " VALUES(?,'consume',1,-1,?,?,?,?)",
+                    (bid, after, f"接种消耗：{vname}",
+                     random.choice(DOCTORS), created))
+            return bid
+
+        # 1) 正常批次（库存充足、效期充足，挂本月消耗流水）
+        add_batch(random.choice([60, 80, 100]),
+                  random.randint(120, 200), random.randint(200, 400),
+                  20, "常规备货批次",
+                  consumed=CONSUMED_PER_VAC[idx % len(CONSUMED_PER_VAC)])
+        # 2) 低库存批次（剩余 ≤ 预警阈值、效期正常）
+        add_batch(random.choice([3, 6, 8]),
+                  random.randint(60, 150), random.randint(120, 300),
+                  20, "库存低于预警阈值，待补货")
+        # 3) 临期批次（30 天内到期）
+        add_batch(random.choice([10, 15, 25]),
+                  random.randint(300, 360), random.randint(3, 28),
+                  20, "临近有效期，请优先使用")
+        # 4) 已过期批次
+        add_batch(random.choice([2, 5]),
+                  random.randint(500, 700), -random.randint(5, 90),
+                  20, "已过期，禁止接种，待报损")
 
 
 if __name__ == "__main__":

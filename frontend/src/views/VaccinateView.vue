@@ -3,8 +3,8 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
-import { petsApi, vaccinesApi, vaccinationsApi } from '../api'
-import type { Pet, Vaccination, Vaccine } from '../api/types'
+import { petsApi, vaccinesApi, vaccinationsApi, inventoryApi } from '../api'
+import type { Pet, Vaccination, Vaccine, VaccineBatch } from '../api/types'
 import { SPECIES_EMOJI } from '../utils/format'
 
 const route = useRoute()
@@ -13,18 +13,17 @@ const router = useRouter()
 const pets = ref<Pet[]>([])
 const vaccines = ref<Vaccine[]>([])
 const records = ref<Vaccination[]>([])
+const batches = ref<VaccineBatch[]>([])
 const saving = ref(false)
 
 const SITES = ['颈部皮下', '肩胛间皮下', '右前肢皮下', '左后肢肌肉', '臀部肌肉']
 const DOCTORS = ['王医生', '李医生', '周医生']
-const MANUFACTURERS = ['硕腾 Zoetis', '勃林格殷格翰', '默沙东 MSD', '中牧股份']
 
 const form = reactive({
   pet_id: undefined as number | undefined,
   vaccine_id: undefined as number | undefined,
   vacc_date: dayjs().format('YYYY-MM-DD'),
-  batch_no: '',
-  manufacturer: '',
+  batch_id: undefined as number | undefined,
   site: SITES[0],
   doctor: DOCTORS[0],
   reaction_level: '无',
@@ -36,6 +35,7 @@ const form = reactive({
 
 const selectedPet = computed(() => pets.value.find(p => p.id === form.pet_id))
 const selectedVac = computed(() => vaccines.value.find(v => v.id === form.vaccine_id))
+const selectedBatch = computed(() => batches.value.find(b => b.id === form.batch_id))
 
 // 接种日期不可选未来；手动下次接种日期不可早于本次接种日期
 const disableFutureDate = (d: Date) => dayjs(d).isAfter(dayjs(), 'day')
@@ -48,6 +48,10 @@ const applicableVaccines = computed(() => {
   return vaccines.value.filter(v => v.species === '通用' || v.species === sp)
 })
 
+// 可选批次：与宠物物种匹配、未过期、库存大于零（usable 由后端实时计算）
+const usableBatches = computed(() =>
+  batches.value.filter(b => b.usable && b.vaccine_id === form.vaccine_id))
+
 // 根据疫苗标准间隔自动计算下次到期日
 watch([() => form.vacc_date, () => form.vaccine_id, () => form.auto_due], () => {
   if (form.auto_due && form.vacc_date && selectedVac.value) {
@@ -56,19 +60,35 @@ watch([() => form.vacc_date, () => form.vaccine_id, () => form.auto_due], () => 
   }
 })
 
-watch(() => form.pet_id, (id) => {
+async function loadBatches() {
+  const sp = selectedPet.value?.species
+  batches.value = await inventoryApi.batches({
+    species: sp || undefined,
+    usable: true,
+  })
+}
+
+watch(() => form.pet_id, async (id) => {
   // 仅当已选疫苗不适用于新宠物时才清空（通用疫苗或同物种疫苗保留，
   // 从到期提醒跳转带入的疫苗因此不会被重置）
   const sp = pets.value.find(p => p.id === id)?.species
   const vac = vaccines.value.find(v => v.id === form.vaccine_id)
   if (sp && vac && vac.species !== '通用' && vac.species !== sp) {
     form.vaccine_id = undefined
+    form.batch_id = undefined
   }
-  // 带出该宠物上次接种医生/批号习惯
+  // 带出该宠物上次接种医生习惯
   const last = records.value.find(r => r.pet_id === id)
   if (last) {
     form.doctor = last.doctor || form.doctor
   }
+  await loadBatches()
+})
+
+// 切换疫苗时重新拉取该疫苗可用批次并清空已选批次
+watch(() => form.vaccine_id, async () => {
+  form.batch_id = undefined
+  await loadBatches()
 })
 
 async function load() {
@@ -81,11 +101,16 @@ async function load() {
   if (route.query.vaccine) {
     form.vaccine_id = Number(route.query.vaccine)
   }
+  await loadBatches()
 }
 
 async function submit() {
   if (!form.pet_id || !form.vaccine_id || !form.vacc_date) {
     ElMessage.warning('请选择宠物、疫苗和接种日期')
+    return
+  }
+  if (!form.batch_id) {
+    ElMessage.warning('请选择与宠物物种匹配、未过期且有库存的疫苗批次')
     return
   }
   if (dayjs(form.vacc_date).isAfter(dayjs(), 'day')) {
@@ -106,8 +131,7 @@ async function submit() {
       pet_id: form.pet_id,
       vaccine_id: form.vaccine_id,
       vacc_date: form.vacc_date,
-      batch_no: form.batch_no,
-      manufacturer: form.manufacturer,
+      batch_id: form.batch_id,
       site: form.site,
       doctor: form.doctor,
       adverse_reaction: reaction,
@@ -115,15 +139,18 @@ async function submit() {
       note: form.note,
     })
     if (res.completed_plan_id) {
-      ElMessage.success(`接种登记成功，下次到期日 ${res.next_due_date}；`
+      ElMessage.success(`接种登记成功，批号 ${res.batch_no}，下次到期日 ${res.next_due_date}；`
         + `已自动完成随访计划 #${res.completed_plan_id}`)
     } else {
-      ElMessage.success(`接种登记成功，下次到期日 ${res.next_due_date}`)
+      ElMessage.success(`接种登记成功，批号 ${res.batch_no}，库存剩余 ${res.remaining} 支`)
     }
     records.value = await vaccinationsApi.list()
-    // 保留宠物和医生，清空批号等
-    form.batch_no = ''; form.reaction_level = '无'
-    form.reaction_detail = ''; form.note = ''
+    await loadBatches()
+    // 保留宠物、医生和疫苗，清空批次与反应备注
+    form.batch_id = undefined
+    form.reaction_level = '无'
+    form.reaction_detail = ''
+    form.note = ''
   } finally {
     saving.value = false
   }
@@ -157,14 +184,33 @@ onMounted(load)
                             value-format="YYYY-MM-DD" :disabled-date="disableFutureDate"
                             style="width:100%" />
           </el-form-item>
-          <el-form-item label="疫苗批号">
-            <el-input v-model="form.batch_no" placeholder="如 B20260815" />
-          </el-form-item>
-          <el-form-item label="生产厂家">
-            <el-select v-model="form.manufacturer" filterable allow-create
-                       placeholder="选择或输入" style="width:100%">
-              <el-option v-for="m in MANUFACTURERS" :key="m" :label="m" :value="m" />
+          <el-form-item label="库存批次" required>
+            <el-select v-model="form.batch_id"
+                       :placeholder="form.vaccine_id ? '选择批次' : '请先选择疫苗'"
+                       :disabled="!form.vaccine_id" style="width:100%">
+              <el-option v-for="b in usableBatches" :key="b.id"
+                :label="`${b.batch_no}（剩 ${b.remaining} 支，有效期至 ${b.expiry_date}）`"
+                :value="b.id">
+                <span>{{ b.batch_no }}</span>
+                <small style="color:#909399;margin-left:8px">
+                  剩 {{ b.remaining }} 支 · {{ b.days_left <= 30 ? `临期(${b.days_left}天)` : `有效期至 ${b.expiry_date}` }}
+                </small>
+              </el-option>
             </el-select>
+          </el-form-item>
+          <el-form-item v-if="form.vaccine_id && usableBatches.length === 0" label=" ">
+            <el-alert type="error" :closable="false" show-icon
+              title="该疫苗当前没有可用批次"
+              description="请先在“疫苗库存”页登记或补充与宠物物种匹配、未过期且库存大于零的批次。" />
+          </el-form-item>
+          <el-form-item label="批号 / 厂家">
+            <el-input :model-value="selectedBatch
+              ? `${selectedBatch.batch_no} ｜ ${selectedBatch.manufacturer}`
+              : '选择批次后自动带出'" readonly>
+              <template #append>
+                <el-button :icon="'Box'" @click="router.push('/inventory')" />
+              </template>
+            </el-input>
           </el-form-item>
           <el-form-item label="注射部位">
             <el-select v-model="form.site" style="width:100%">
@@ -226,7 +272,9 @@ onMounted(load)
             </template>
           </el-table-column>
           <el-table-column prop="vaccine_name" label="疫苗" min-width="100" />
-          <el-table-column prop="batch_no" label="批号" width="90" />
+          <el-table-column prop="batch_no" label="批号" width="90">
+            <template #default="{ row }">{{ row.batch_no || '—' }}</template>
+          </el-table-column>
           <el-table-column prop="site" label="部位" width="95" />
           <el-table-column prop="doctor" label="医生" width="70" />
           <el-table-column label="不良反应" width="85">

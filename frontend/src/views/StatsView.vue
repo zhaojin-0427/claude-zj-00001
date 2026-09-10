@@ -43,6 +43,26 @@ const followupCards = computed(() => {
   ]
 })
 
+// 疫苗库存指标
+const inventoryCards = computed(() => {
+  if (!stats.value) return []
+  const inv = stats.value.inventory
+  return [
+    { label: '当前库存总量', value: inv.stock_total, suffix: ' 支',
+      sub: `未过期可用 ${inv.stock_valid} 支 · 共 ${inv.batch_count} 个批次`,
+      color: '#409eff', icon: '📦' },
+    { label: '30 天内临期数量', value: inv.expiring_soon_qty, suffix: ' 支',
+      sub: `涉及 ${inv.expiring_soon_batches} 个临期批次`,
+      color: '#e6a23c', icon: '⏰' },
+    { label: '低库存批次数', value: inv.low_batch_count, suffix: ' 个',
+      sub: `剩余数量 ≤ 预警阈值${inv.expired_batch_count ? ` · 已过期 ${inv.expired_batch_count} 批` : ''}`,
+      color: '#f56c6c', icon: '⚠️' },
+    { label: '本月消耗量', value: inv.month_consumed, suffix: ' 支',
+      sub: `本月接种消耗 ${inv.month_consume_times} 次`,
+      color: '#67c23a', icon: '💉' },
+  ]
+})
+
 // 随访计划状态构成
 const followupData = computed(() => ({
   labels: ['待确认', '已确认', '已完成', '已取消'],
@@ -167,6 +187,20 @@ onMounted(async () => {
     <!-- 四项核心指标 -->
     <el-row :gutter="16" style="margin-bottom:16px">
       <el-col v-for="m in metricCards" :key="m.label" :span="6">
+        <div class="stat-card">
+          <div class="icon-box" :style="{ background: m.color }">{{ m.icon }}</div>
+          <div>
+            <div class="stat-value">{{ m.value }}<span style="font-size:15px">{{ m.suffix }}</span></div>
+            <div class="stat-label">{{ m.label }}</div>
+            <div class="stat-sub">{{ m.sub }}</div>
+          </div>
+        </div>
+      </el-col>
+    </el-row>
+
+    <!-- 疫苗库存指标 -->
+    <el-row :gutter="16" style="margin-bottom:16px">
+      <el-col v-for="m in inventoryCards" :key="m.label" :span="6">
         <div class="stat-card">
           <div class="icon-box" :style="{ background: m.color }">{{ m.icon }}</div>
           <div>

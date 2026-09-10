@@ -52,10 +52,68 @@ export interface Vaccination {
   reaction_level?: 'none' | 'mild' | 'severe'
   next_due_date?: string
   note?: string
+  batch_id?: number | null
   pet_name?: string
   species?: string
   owner_name?: string
   owner_phone?: string
+}
+
+// 库存批次实时状态：normal 正常 / low 低库存 / expiring 临期 / expired 已过期
+export type BatchStatus = 'normal' | 'low' | 'expiring' | 'expired'
+
+export interface VaccineBatch {
+  id: number
+  vaccine_id: number
+  batch_no: string
+  manufacturer: string
+  production_date: string
+  expiry_date: string
+  initial_quantity: number
+  remaining: number
+  warning_threshold: number
+  operator: string
+  note?: string
+  created_at?: string
+  vaccine_name?: string
+  vaccine_species?: string
+  interval_days?: number
+  days_left: number
+  status: BatchStatus
+  usable: boolean
+}
+
+export interface BatchCreate {
+  vaccine_id: number
+  batch_no: string
+  manufacturer: string
+  production_date: string
+  expiry_date: string
+  quantity: number
+  warning_threshold: number
+  operator: string
+  note?: string
+}
+
+// 库存流水类型：inbound 入库 / consume 接种消耗 / adjust 调整
+export type StockTxnType = 'inbound' | 'consume' | 'adjust'
+
+export interface InventoryTransaction {
+  id: number
+  batch_id: number
+  vaccination_id?: number | null
+  type: StockTxnType
+  quantity: number
+  delta: number
+  remaining_after: number
+  reason: string
+  operator: string
+  created_at: string
+  batch_no?: string
+  manufacturer?: string
+  vaccine_name?: string
+  vaccine_species?: string
+  pet_name?: string
 }
 
 export interface AntibodyTest {
@@ -186,4 +244,15 @@ export interface Stats {
     adverse_reaction: string
     doctor: string
   }[]
+  inventory: {
+    batch_count: number
+    stock_total: number
+    stock_valid: number
+    expiring_soon_qty: number
+    expiring_soon_batches: number
+    low_batch_count: number
+    expired_batch_count: number
+    month_consumed: number
+    month_consume_times: number
+  }
 }

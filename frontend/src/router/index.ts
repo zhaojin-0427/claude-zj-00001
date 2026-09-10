@@ -21,6 +21,12 @@ const routes = [
     meta: { title: '接种登记', icon: 'Syringe' },
   },
   {
+    path: '/inventory',
+    name: 'inventory',
+    component: () => import('../views/InventoryView.vue'),
+    meta: { title: '疫苗库存', icon: 'Box' },
+  },
+  {
     path: '/reminders',
     name: 'reminders',
     component: () => import('../views/RemindersView.vue'),
