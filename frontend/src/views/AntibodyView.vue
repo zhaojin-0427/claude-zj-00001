@@ -130,6 +130,10 @@ async function submit() {
     ElMessage.warning('请完善必填项')
     return
   }
+  if (dayjs(form.test_date).isAfter(dayjs(), 'day')) {
+    ElMessage.warning('检测日期不得晚于今天')
+    return
+  }
   saving.value = true
   try {
     await antibodiesApi.create({ ...form, result: form.result as AntibodyTest['result'] })
@@ -219,7 +223,8 @@ onMounted(loadPets)
       </el-form-item>
       <el-form-item label="检测日期" required>
         <el-date-picker v-model="form.test_date" type="date"
-                        value-format="YYYY-MM-DD" style="width:100%" />
+                        value-format="YYYY-MM-DD" style="width:100%"
+                        :disabled-date="(d: Date) => dayjs(d).isAfter(dayjs(), 'day')" />
       </el-form-item>
       <el-form-item label="结果" required>
         <el-radio-group v-model="form.result">

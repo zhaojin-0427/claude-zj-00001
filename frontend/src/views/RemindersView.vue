@@ -210,7 +210,8 @@ onMounted(async () => {
     <el-table-column label="操作" width="130" fixed="right">
       <template #default="{ row }">
         <el-button size="small" type="primary"
-                   @click="router.push({ path: '/vaccinate', query: { pet: row.pet_id } })">
+                   @click="router.push({ path: '/vaccinate',
+                     query: { pet: row.pet_id, vaccine: row.vaccine_id } })">
           登记接种
         </el-button>
       </template>

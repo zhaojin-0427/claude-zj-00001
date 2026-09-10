@@ -37,6 +37,11 @@ const form = reactive({
 const selectedPet = computed(() => pets.value.find(p => p.id === form.pet_id))
 const selectedVac = computed(() => vaccines.value.find(v => v.id === form.vaccine_id))
 
+// 接种日期不可选未来；手动下次接种日期不可早于本次接种日期
+const disableFutureDate = (d: Date) => dayjs(d).isAfter(dayjs(), 'day')
+const disableBeforeVaccDate = (d: Date) =>
+  form.vacc_date ? dayjs(d).isBefore(dayjs(form.vacc_date), 'day') : false
+
 const applicableVaccines = computed(() => {
   const sp = selectedPet.value?.species
   if (!sp) return vaccines.value
@@ -52,7 +57,13 @@ watch([() => form.vacc_date, () => form.vaccine_id, () => form.auto_due], () => 
 })
 
 watch(() => form.pet_id, (id) => {
-  form.vaccine_id = undefined
+  // 仅当已选疫苗不适用于新宠物时才清空（通用疫苗或同物种疫苗保留，
+  // 从到期提醒跳转带入的疫苗因此不会被重置）
+  const sp = pets.value.find(p => p.id === id)?.species
+  const vac = vaccines.value.find(v => v.id === form.vaccine_id)
+  if (sp && vac && vac.species !== '通用' && vac.species !== sp) {
+    form.vaccine_id = undefined
+  }
   // 带出该宠物上次接种医生/批号习惯
   const last = records.value.find(r => r.pet_id === id)
   if (last) {
@@ -67,11 +78,23 @@ async function load() {
   if (route.query.pet) {
     form.pet_id = Number(route.query.pet)
   }
+  if (route.query.vaccine) {
+    form.vaccine_id = Number(route.query.vaccine)
+  }
 }
 
 async function submit() {
   if (!form.pet_id || !form.vaccine_id || !form.vacc_date) {
     ElMessage.warning('请选择宠物、疫苗和接种日期')
+    return
+  }
+  if (dayjs(form.vacc_date).isAfter(dayjs(), 'day')) {
+    ElMessage.warning('接种日期不得晚于今天')
+    return
+  }
+  if (!form.auto_due && form.next_due_date
+      && dayjs(form.next_due_date).isBefore(dayjs(form.vacc_date), 'day')) {
+    ElMessage.warning('下次接种日期不得早于本次接种日期')
     return
   }
   const reaction = form.reaction_level === '无'
@@ -131,7 +154,8 @@ onMounted(load)
           </el-form-item>
           <el-form-item label="接种日期" required>
             <el-date-picker v-model="form.vacc_date" type="date"
-                            value-format="YYYY-MM-DD" style="width:100%" />
+                            value-format="YYYY-MM-DD" :disabled-date="disableFutureDate"
+                            style="width:100%" />
           </el-form-item>
           <el-form-item label="疫苗批号">
             <el-input v-model="form.batch_no" placeholder="如 B20260815" />
@@ -168,6 +192,7 @@ onMounted(load)
               <el-switch v-model="form.auto_due" active-text="自动" />
               <el-date-picker v-model="form.next_due_date" type="date"
                               value-format="YYYY-MM-DD" :disabled="form.auto_due"
+                              :disabled-date="disableBeforeVaccDate"
                               style="flex:1" />
             </div>
             <small v-if="selectedVac && form.auto_due" style="color:#909399">

@@ -241,6 +241,12 @@ def create_vaccination():
     for f in ["pet_id", "vaccine_id", "vacc_date"]:
         if not d.get(f):
             return jsonify({"error": f"缺少必填字段 {f}"}), 400
+    try:
+        vacc_date = parse_date(d["vacc_date"])
+    except (ValueError, TypeError):
+        return jsonify({"error": "接种日期格式应为 YYYY-MM-DD"}), 400
+    if vacc_date > today():
+        return jsonify({"error": "接种日期不得晚于今天"}), 400
     db = get_db()
     vac = db.execute("SELECT * FROM vaccines WHERE id=?",
                      (d["vaccine_id"],)).fetchone()
@@ -252,8 +258,14 @@ def create_vaccination():
     # 自动计算下次到期日：接种日 + 疫苗标准间隔（也允许前端传入覆盖）
     next_due = d.get("next_due_date")
     if not next_due:
-        next_due = (parse_date(d["vacc_date"])
-                    + timedelta(days=vac["interval_days"])).isoformat()
+        next_due = (vacc_date + timedelta(days=vac["interval_days"])).isoformat()
+    else:
+        try:
+            next_due_date = parse_date(next_due)
+        except (ValueError, TypeError):
+            return jsonify({"error": "下次接种日期格式应为 YYYY-MM-DD"}), 400
+        if next_due_date < vacc_date:
+            return jsonify({"error": "下次接种日期不得早于本次接种日期"}), 400
 
     reaction = d.get("adverse_reaction", "无") or "无"
     cur = db.execute(
@@ -309,6 +321,12 @@ def create_antibody():
             return jsonify({"error": f"缺少必填字段 {f}"}), 400
     if d["result"] not in ("阳性", "弱阳性", "阴性"):
         return jsonify({"error": "检测结果必须为 阳性/弱阳性/阴性"}), 400
+    try:
+        test_date = parse_date(d["test_date"])
+    except (ValueError, TypeError):
+        return jsonify({"error": "检测日期格式应为 YYYY-MM-DD"}), 400
+    if test_date > today():
+        return jsonify({"error": "检测日期不得晚于今天"}), 400
     db = get_db()
     cur = db.execute(
         """INSERT INTO antibody_tests(pet_id,vaccine_id,test_date,result,titer,lab,note)
@@ -647,10 +665,16 @@ def stats():
     g_tot = g_pos + g_weak + g_neg
 
     # 5) 月度接种趋势 & 物种分布（辅助图表）
-    monthly = [row_to_dict(r) for r in db.execute(
+    # 最近 12 个自然月（含当月），无记录的月份补 0
+    month_counts = {r["month"]: r["cnt"] for r in db.execute(
         """SELECT substr(vacc_date,1,7) AS month, COUNT(*) AS cnt
-           FROM vaccinations GROUP BY month ORDER BY month DESC LIMIT 12""")]
-    monthly.reverse()
+           FROM vaccinations GROUP BY month""")}
+    monthly = []
+    cursor = today().replace(day=1)
+    for _ in range(12):
+        key = cursor.isoformat()[:7]
+        monthly.insert(0, {"month": key, "cnt": month_counts.get(key, 0)})
+        cursor = (cursor - timedelta(days=1)).replace(day=1)
     species_dist = [row_to_dict(r) for r in db.execute(
         "SELECT species, COUNT(*) AS cnt FROM pets GROUP BY species")]
     recent_reactions = [row_to_dict(r) for r in db.execute(
